@@ -1,0 +1,283 @@
+/*#include <misc.h>
+#include <stm32f10x.h>
+#include <stm32f10x_exti.h>
+#include <stm32f10x_gpio.h>
+#include <stm32f10x_rcc.h>
+#include <stm32f10x_usart.h>
+#include <stm32f10x_adc.h>
+#include <lcd.h>
+#include <Touch.h>
+#include <stdio.h>
+#include <stdlib.h>*/
+#include "misc.h"
+#include "stm32f10x.h"
+#include "stm32f10x_exti.h"
+#include "stm32f10x_gpio.h"
+#include "stm32f10x_rcc.h"
+#include "stm32f10x_dma.h"
+#include "stm32f10x_usart.h"
+#include "stm32f10x_adc.h"
+#include "lcd.h"
+#include "Touch.h"
+#include "stm32f10x_tim.h"
+uint16_t pos_x,pos_y;
+uint16_t pix_x,pix_y;
+uint16_t jodo;
+
+vu32 ADCvalue[2];
+
+int time = 0;
+
+// 버튼의 위치를 저장하는 변수
+int button_pos[4][2];
+
+// led 켜지고 꺼진 상태 토글
+int button[] = {0, 0, 0, 0};
+
+void delay(int i){
+	int j;
+	for(j=0; j<=i * 100000; j++);
+}
+void RCC_Config(void) {
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
+}
+
+void GPIO_Config(void) {
+	GPIO_InitTypeDef GPIO_init;
+	GPIO_init.GPIO_Pin = GPIO_Pin_3;
+	GPIO_init.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &GPIO_init);
+
+	GPIO_init.GPIO_Pin = GPIO_Pin_2;
+	GPIO_init.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &GPIO_init);
+
+
+	GPIO_init.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_init.GPIO_Pin = (GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_7);
+	GPIO_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOD, &GPIO_init);
+}
+
+void NVIC_Config(void) {
+	NVIC_InitTypeDef NVIC_init;
+	NVIC_init.NVIC_IRQChannel = ADC1_2_IRQn;
+	NVIC_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_init.NVIC_IRQChannelPreemptionPriority = 0;
+	NVIC_init.NVIC_IRQChannelSubPriority = 0;
+	NVIC_Init(&NVIC_init);
+}
+
+void ADC_Config(void) {
+	ADC_InitTypeDef ADC_init;
+	ADC_DeInit(ADC1);
+
+	// ADC1 parameter
+	ADC_init.ADC_ContinuousConvMode = ENABLE;
+	ADC_init.ADC_DataAlign = ADC_DataAlign_Right;
+	ADC_init.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
+	ADC_init.ADC_Mode = ADC_Mode_Independent;
+	ADC_init.ADC_NbrOfChannel = 3;
+	ADC_init.ADC_ScanConvMode = ENABLE;
+	ADC_Init(ADC1, &ADC_init);
+
+	// ADC Channel Config
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_3, 1, ADC_SampleTime_239Cycles5);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);
+	ADC_DMACmd(ADC1, ENABLE);
+	ADC_ITConfig(ADC1, ADC_IT_EOC, ENABLE);
+	ADC_Cmd(ADC1, ENABLE);
+
+	// ADC Start
+	ADC_ResetCalibration(ADC1);
+	while(ADC_GetCalibrationStatus(ADC1));
+	ADC_StartCalibration(ADC1);
+	while(ADC_GetCalibrationStatus(ADC1));
+	ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+}
+
+
+void SysInit(void)
+{
+	/* Reset the RCC clock configuration to the default reset state(for debug purpose) */
+	/* Set HSION bit */
+	RCC->CR |= (uint32_t)0x00000001;
+
+	/* Reset SW, HPRE, PPRE1, PPRE2, ADCPRE and MCO bits */
+	RCC->CFGR &= (uint32_t)0xF0FF0000;
+
+	/* Reset HSEON, CSSON and PLLON bits */
+	RCC->CR &= (uint32_t)0xFEF6FFFF;
+
+	/* Reset HSEBYP bit */
+	RCC->CR &= (uint32_t)0xFFFBFFFF;
+
+	/* Reset PLLSRC, PLLXTPRE, PLLMUL and USBPRE/OTGFSPRE bits */
+	RCC->CFGR &= (uint32_t)0xFF80FFFF;
+
+	/* Reset PLL2ON and PLL3ON bits */
+	RCC->CR &= (uint32_t)0xEBFFFFFF;
+
+	/* Disable all interrupts and clear pending bits  */
+	RCC->CIR = 0x00FF0000;
+
+	/* Reset CFGR2 register */
+	RCC->CFGR2 = 0x00000000;
+}
+
+void init_Timer() {
+	NVIC_InitTypeDef NVIC_init;
+	TIM_TimeBaseInitTypeDef tim_timebaseinit;
+
+	// TIMx_CNT : counter 값 들어있는 reg
+	// TIMx_PSC : clock 부주하기 위한 값 prescaler
+	// TIMx_ARR : counter가 카운트할 최대 값
+
+	NVIC_init.NVIC_IRQChannel = TIM2_IRQn;
+	NVIC_init.NVIC_IRQChannelPreemptionPriority = 0;
+	NVIC_init.NVIC_IRQChannelSubPriority = 0;
+	NVIC_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_init);
+
+	// 72mhz / 3600 * 2000 = 0.1s
+	tim_timebaseinit.TIM_Period = 2000;
+	tim_timebaseinit.TIM_Prescaler = 3600;
+
+	// Specifies the clock division
+	tim_timebaseinit.TIM_ClockDivision = TIM_CKD_DIV1;	// tDTS = tCK_INT
+	// Specifies the counter mode
+	tim_timebaseinit.TIM_CounterMode = TIM_CounterMode_Up;	// TIM Up Counting Mode
+	TIM_TimeBaseInit(TIM2, &tim_timebaseinit);
+
+	// TIM2 peripheral Preload register on ARR
+	TIM_ARRPreloadConfig(TIM2, ENABLE);
+
+	TIM_Cmd(TIM2, ENABLE);
+
+
+	// TIM_IT_Update : TIM update Interrupt source
+	TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE); // interrupt enable
+
+}
+
+
+void drawRectangle() {
+	LCD_DrawRectangle(0, 70, 120, 140);
+	LCD_DrawRectangle(120, 70, 240, 140);
+	LCD_DrawRectangle(0, 140, 120, 210);
+	LCD_DrawRectangle(120, 140, 240, 210);
+	LCD_DrawRectangle(0, 210, 120, 280);
+	LCD_DrawRectangle(120, 210, 240, 280);
+}
+void showString() {
+	LCD_ShowNum(10, 80, 1, 1, BLACK, WHITE);
+	LCD_ShowNum(130, 80, 2, 1, BLACK, WHITE);
+	LCD_ShowNum(10, 150, 3, 1, BLACK, WHITE);
+	LCD_ShowNum(130, 150, 4, 1, BLACK, WHITE);
+	LCD_ShowString(10, 220, "OFF", BLACK, WHITE);
+	LCD_ShowString(130, 220, "ADC", BLACK, WHITE);
+}
+void showPoint(u16 x, u16 y) {
+	LCD_ShowNum(80, 20, x, 2, BLACK, WHITE);
+	LCD_ShowNum(80, 40, y, 2, BLACK, WHITE);
+}
+
+void DMA_Channel_Config(void){
+	DMA_InitTypeDef DMA_InitStructure;
+	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+
+	DMA_DeInit(DMA1_Channel1);
+	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t) &ADC1->DR;
+	DMA_InitStructure.DMA_MemoryBaseAddr = (uint32_t) ADCvalue;
+	DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralSRC;
+	DMA_InitStructure.DMA_BufferSize = 2;
+	DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+	DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
+	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Word;
+	DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_Word;
+	DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
+	DMA_InitStructure.DMA_Priority = DMA_Priority_High;
+	DMA_InitStructure.DMA_M2M = DMA_M2M_Disable;
+	DMA_Init(DMA1_Channel1, &DMA_InitStructure);
+
+	DMA_Cmd(DMA1_Channel1, ENABLE);
+}
+
+/*
+void ADC1_2_IRQHandler(void) {
+	uint16_t input;
+//	u8 str[10];
+	uint16_t pos_x,pos_y;
+	uint16_t pix_x,pix_y;
+	double result;
+//
+////	while(ADC_GetFlagStatus(ADC1, 0x2)==RESET);
+	ADC_ClearITPendingBit(ADC1,ADC_IT_EOC);
+	//	LCD_DrawRectangle(pix_x, pix_y, pix_x+10, pix_y+10);
+
+	drawRectangle();
+	showString();
+	Touch_GetXY(&pos_x,&pos_y,1);
+	Convert_Pos(pos_x, pos_y,&pix_x,&pix_y);
+
+	Draw_Big_Point(pix_x,pix_y);
+	showPoint(pix_x, pix_y);
+	LCD_ShowNum(20, 20, jodo, 4, BLACK, WHITE);
+	if(pix_x >= 120 && pix_x <= 240 && pix_y >= 210 && pix_y <= 280) // ADC
+		jodo = ADC_GetConversionValue(ADC1);
+		LCD_ShowNum(20, 20, jodo, 6, BLACK, WHITE);
+	if(pix_x > 0 && pix_x <= 120 && pix_y >= 70 && pix_y <= 140) { // 1
+		GPIO_SetBits(GPIOD, GPIO_Pin_2);
+	}
+	if(pix_x >= 120 && pix_x <= 240 && pix_y >= 70 && pix_y <= 140) {// 2
+		GPIO_SetBits(GPIOD, GPIO_Pin_3);
+	}
+	if(pix_x > 0 && pix_x <= 120 && pix_y >= 140 && pix_y <= 210) {// 3
+		GPIO_SetBits(GPIOD, GPIO_Pin_4);
+	}
+	if(pix_x >= 120 && pix_x <= 240 && pix_y >= 140 && pix_y <= 210) {// 4
+		GPIO_SetBits(GPIOD, GPIO_Pin_7);
+	}
+	if(pix_x > 0 && pix_x <= 120 && pix_y >= 210 && pix_y <= 280) {// off
+		GPIO_ResetBits(GPIOD, GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_7);
+	}
+}
+*/
+
+void TIM2_IRQHandler(void) {
+	time ++;
+	LCD_ShowNum(100,200, time, 4, BLACK, WHITE);
+	LCD_ShowNum(50, 100, ADCvalue[0], 4, BLACK, WHITE);
+	LCD_ShowNum(50, 150, ADCvalue[1], 4, BLACK, WHITE);
+
+	TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+}
+
+
+int color[12]={WHITE,CYAN,BLUE,RED,MAGENTA,LGRAY,GREEN,YELLOW,BROWN,BRRED,GRAY};
+int main(){
+
+	SystemInit();
+	LCD_Init();
+	Touch_Configuration();
+	Touch_Adjust();
+	LCD_Clear(WHITE);
+
+	init_Timer();
+	RCC_Config();
+	GPIO_Config();
+	NVIC_Config();
+	ADC_Config();
+	//DMA_Channel_Config();
+
+	while(1){
+		LCD_ShowString(50, 50, "HELLO WORLD", BLACK, WHITE);
+	}
+}
